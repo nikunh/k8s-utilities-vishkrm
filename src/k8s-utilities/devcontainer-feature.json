@@ -1,6 +1,6 @@
 {
   "id": "k8s-utilities",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "name": "Kubernetes Utilities",
   "description": "Installs kubie, kubectl, k9s, and zsh integration for Kubernetes workflows.",
   "documentationURL": "https://github.com/nikunh/k8s-utilities-vishkrm",

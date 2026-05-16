@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/bin/bash
 set -e
 
 # Logging mechanism for debugging
@@ -16,6 +16,18 @@ log_debug "Environment: USER=$USER HOME=$HOME"
 # Set non-interactive environment
 export DEBIAN_FRONTEND=noninteractive
 
+# Audit fix 2026-05-15: resolve runtime user/home/group BEFORE binary installs
+# so kubie/kubectl land in the runtime user's $HOME, not /root.
+USERNAME="${USERNAME:-${_REMOTE_USER:-vishkrm}}"
+USER_HOME="$(getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6)"
+[ -z "$USER_HOME" ] && USER_HOME="/home/${USERNAME}"
+USER_GROUP="$(id -gn "$USERNAME" 2>/dev/null || echo users)"
+USER_BIN="${USER_HOME}/.local/bin"
+
+# Ensure target dir exists with correct ownership BEFORE root-owned sudo mv
+mkdir -p "$USER_BIN"
+chown "${USERNAME}:${USER_GROUP}" "$USER_HOME/.local" "$USER_BIN" 2>/dev/null || true
+
 # Function to get system architecture
 get_architecture() {
     local arch="$(uname -m)"
@@ -27,39 +39,38 @@ get_architecture() {
     esac
 }
 
-# Install kubie
-if ! command -v kubie &> /dev/null; then
+# Install kubie (to runtime user's $HOME/.local/bin, not /root/.local/bin)
+if [ ! -x "$USER_BIN/kubie" ]; then
   ARCH=$(get_architecture)
-  curl -LO https://github.com/sbstp/kubie/releases/latest/download/kubie-linux-${ARCH}
-  mkdir -p "$HOME/.local/bin"
-  sudo mv kubie-linux-${ARCH} "$HOME/.local/bin/kubie"
-  sudo chmod +x "$HOME/.local/bin/kubie"
+  echo "Downloading kubie for linux-${ARCH}..."
+  curl -fLo /tmp/kubie "https://github.com/sbstp/kubie/releases/latest/download/kubie-linux-${ARCH}"
+  install -m 0755 -o "$USERNAME" -g "$USER_GROUP" /tmp/kubie "$USER_BIN/kubie"
+  rm -f /tmp/kubie
+  echo "kubie installed at $USER_BIN/kubie"
 fi
 
-# Install kubectl
+# Install kubectl (to /usr/local/bin — system-wide, always on PATH)
 if ! command -v kubectl &> /dev/null; then
   ARCH=$(get_architecture)
-  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl"
-  chmod +x kubectl
-  sudo mv kubectl ~/.local/bin/
+  KVER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+  echo "Downloading kubectl ${KVER} for linux-${ARCH}..."
+  curl -fLo /tmp/kubectl "https://dl.k8s.io/release/${KVER}/bin/linux/${ARCH}/kubectl"
+  sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+  rm -f /tmp/kubectl
+  echo "kubectl installed at /usr/local/bin/kubectl"
 fi
 
 # Install k9s
 if ! command -v k9s &> /dev/null; then
   ARCH=$(get_architecture)
-  # Note: k9s uses different architecture naming for .deb files
   case "$ARCH" in
     arm64) DEB_ARCH="arm64" ;;
     *) DEB_ARCH="amd64" ;;
   esac
-  wget https://github.com/derailed/k9s/releases/latest/download/k9s_linux_${DEB_ARCH}.deb
-  sudo apt install -y ./k9s_linux_${DEB_ARCH}.deb
-  rm k9s_linux_${DEB_ARCH}.deb
+  wget -q "https://github.com/derailed/k9s/releases/latest/download/k9s_linux_${DEB_ARCH}.deb" -O /tmp/k9s.deb
+  sudo apt install -y /tmp/k9s.deb
+  rm -f /tmp/k9s.deb
 fi
-
-# Get username from environment or default to babaji
-USERNAME=${USERNAME:-"babaji"}
-USER_HOME="/home/${USERNAME}"
 
 # 🧩 Create Self-Healing Environment Fragment
 create_environment_fragment() {
@@ -117,14 +128,14 @@ fi'
     if [ -d "$USER_HOME/.ohmyzsh_source_load_scripts" ]; then
         echo "$fragment_content" > "$fragment_file_user"
         if [ "$USER" != "$USERNAME" ]; then
-            chown ${USERNAME}:${USERNAME} "$fragment_file_user" 2>/dev/null || chown ${USERNAME}:users "$fragment_file_user" 2>/dev/null || true
+            chown "${USERNAME}:${USER_GROUP}" "$fragment_file_user" 2>/dev/null || true
         fi
     elif [ -d "$USER_HOME" ]; then
         # Create the directory if it doesn't exist
         mkdir -p "$USER_HOME/.ohmyzsh_source_load_scripts"
         echo "$fragment_content" > "$fragment_file_user"
         if [ "$USER" != "$USERNAME" ]; then
-            chown -R ${USERNAME}:${USERNAME} "$USER_HOME/.ohmyzsh_source_load_scripts" 2>/dev/null || chown -R ${USERNAME}:users "$USER_HOME/.ohmyzsh_source_load_scripts" 2>/dev/null || true
+            chown -R "${USERNAME}:${USER_GROUP}" "$USER_HOME/.ohmyzsh_source_load_scripts" 2>/dev/null || true
         fi
     fi
     
